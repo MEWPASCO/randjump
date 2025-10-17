@@ -16,7 +16,7 @@ const BLOCK_WORDS = [
 ];
 
 const QUERIES = [
-  "jumping spider"  
+  "jumping spider",  
   "jumping spider macro photo",
   "jumping spider close up photo",
   "salticidae macro photo",
