@@ -1,5 +1,5 @@
-// api/jumpingspider.js — fetch-only, streams image/* bytes
-// Env: SERPAPI_KEY (optional; we fallback to Wikimedia if missing)
+// api/jumpingspider.js — SerpAPI Google Images, streams image/*
+// Same structure as your raccoon/lizard routes, just stricter filters.
 
 export const config = { api: { bodyParser: false } };
 
@@ -12,18 +12,27 @@ const BLOCK_SITES = [
 const BLOCK_WORDS = [
   "sticker","clipart","svg","logo","vector","icon",
   "plush","plushie","toy","merch","tattoo","drawing",
-  "ai","midjourney","dalle","generated","fursuit","meme","cartoon"
+  "ai","midjourney","dalle","generated","meme","cartoon"
 ];
 
+// MUST contain at least one of these in title or link
+const REQUIRE_WORDS = [
+  "jump", "spider", "salticidae", "phidippus", "maratus", "habronattus", "portia", "regius", "audax"
+];
+
+// Hard filter out common wrong species
+const EXTRA_NEG = ["-lizard","-gecko","-iguana","-scorpion","-mantis","-ant","-beetle","-fly","-moth","-butterfly","-tick","-tarantula"];
+
+// Only jumping-spider queries
 const QUERIES = [
   "jumping spider macro photo",
-  "phidippus regius macro photography",
-  "cute jumping spider close up",
-  "salticidae macro wildlife photo",
+  "jumping spider close up photo",
+  "salticidae macro photo",
+  "phidippus regius macro photo",
+  "phidippus audax macro photo",
+  "maratus jumping spider macro photo",
   "jumping spider eyes macro",
-  "jumping spider face close up",
-  "phidippus jumping spider photography",
-  "colorful jumping spider macro wildlife"
+  "cute jumping spider macro photo"
 ];
 
 const FALLBACKS = [
@@ -43,16 +52,20 @@ function setCache(res){
   res.setHeader("Cache-Control","public, s-maxage=3600, stale-while-revalidate=43200");
 }
 function blockedSite(url){
-  try{ const h=new URL(url).hostname.toLowerCase();
-       return BLOCK_SITES.some(d=>h.includes(d));
-  }catch{ return true; }
+  try{ const h = new URL(url).hostname.toLowerCase();
+       return BLOCK_SITES.some(d => h.includes(d));
+  }catch{ return false; } // don't over-block on parse errors
 }
 function blockedWords(text=""){
-  const s=String(text).toLowerCase();
-  return BLOCK_WORDS.some(w=>s.includes(w));
+  const s = String(text).toLowerCase();
+  return BLOCK_WORDS.some(w => s.includes(w));
+}
+function requiresSpider(text=""){
+  const s = String(text).toLowerCase();
+  return REQUIRE_WORDS.some(w => s.includes(w));
 }
 async function fetchJSON(url){
-  const r = await fetch(url, { redirect:"follow" });
+  const r = await fetch(url, { redirect:"follow", headers:{"user-agent":"Mozilla/5.0"} });
   if(!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -81,27 +94,25 @@ export default async function handler(req,res){
   const userQ = (req.query.q||"").toString().trim();
   const baseQuery = userQ || pick(QUERIES);
 
-  // If no key, serve Wikimedia fallback as bytes
+  // No key → Wikimedia fallback
   if(!serpKey){
     setCache(res);
     const url = pick(FALLBACKS);
     const data = await fetchAsImage(url);
     if(!data) return res.status(500).json({ ok:false, error:"no_key_and_fallback_failed" });
-
     if((req.query.format||"").toString().toLowerCase()==="json"){
       return res.status(200).json({ ok:true, source:"static_fallback", image:url, content_type:data.ct });
     }
-
     res.setHeader("Content-Type", data.ct);
     res.setHeader("Content-Disposition", `inline; filename="jumpingspider.${data.ext}"`);
     return res.status(200).send(data.buf);
   }
 
-  // random page 0..5
   const ijn = Math.floor(Math.random()*6);
+  const q = [baseQuery, ...EXTRA_NEG].join(" ");
   const params = new URLSearchParams({
     engine:"google_images",
-    q: `${baseQuery} -plush -toy -merch -clipart -sticker -logo -vector -cartoon`,
+    q,
     tbm:"isch",
     tbs:"itp:photo,isz:l",
     safe:"active",
@@ -109,24 +120,25 @@ export default async function handler(req,res){
     api_key:serpKey
   });
 
-  let candidates=[];
+  let candidates = [];
   try{
     const data = await fetchJSON(`https://serpapi.com/search.json?${params.toString()}`);
-    candidates = Array.isArray(data.images_results) ? data.images_results : [];
+    const list = Array.isArray(data.images_results) ? data.images_results : [];
+    candidates = list.filter(r=>{
+      const url = r?.original || r?.thumbnail || "";
+      const title = r?.title || "";
+      const link = r?.link || "";
+      if(!url) return false;
+      if(url.toLowerCase().endsWith(".svg")) return false;
+      if(blockedSite(url)) return false;
+      if(blockedWords(title)) return false;
+      // REQUIRE spider terms in title or link
+      if(!(requiresSpider(title) || requiresSpider(link))) return false;
+      return true;
+    });
   }catch{
     // fall through to static
   }
-
-  // minimal prefilter
-  candidates = candidates.filter(r=>{
-    const url = r?.original || r?.thumbnail || "";
-    const title = r?.title || "";
-    if(!url) return false;
-    if(blockedSite(url)) return false;
-    if(blockedWords(title)) return false;
-    if(url.toLowerCase().endsWith(".svg")) return false;
-    return true;
-  });
 
   // shuffle
   for(let i=candidates.length-1;i>0;i--){
@@ -136,8 +148,7 @@ export default async function handler(req,res){
 
   setCache(res);
 
-  // try up to 10 candidates
-  const MAX_TRIES = Math.min(10, candidates.length);
+  const MAX_TRIES = Math.min(12, candidates.length);
   for(let i=0;i<MAX_TRIES;i++){
     const url = candidates[i]?.original || candidates[i]?.thumbnail;
     try{
@@ -145,7 +156,10 @@ export default async function handler(req,res){
       if(!data) continue;
 
       if((req.query.format||"").toString().toLowerCase()==="json"){
-        return res.status(200).json({ ok:true, source:"serpapi", image:url, content_type:data.ct });
+        return res.status(200).json({
+          ok:true, source:"serpapi", image:url, content_type:data.ct,
+          candidates:candidates.length
+        });
       }
 
       res.setHeader("Content-Type", data.ct);
@@ -159,11 +173,9 @@ export default async function handler(req,res){
     const url = pick(FALLBACKS);
     const data = await fetchAsImage(url);
     if(!data) throw new Error("fallback failed");
-
     if((req.query.format||"").toString().toLowerCase()==="json"){
       return res.status(200).json({ ok:true, source:"static_fallback", image:url, content_type:data.ct });
     }
-
     res.setHeader("Content-Type", data.ct);
     res.setHeader("Content-Disposition", `inline; filename="jumpingspider.${data.ext}"`);
     return res.status(200).send(data.buf);
